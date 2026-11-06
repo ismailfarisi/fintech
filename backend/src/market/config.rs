@@ -42,7 +42,7 @@ pub enum ProviderConfig {
 /// Inputs a provider may need at construction time.
 #[derive(Default)]
 pub struct BuildContext {
-    /// Last known prices from the data file.
+    /// Last known prices, used by the simulator to resume (empty by default).
     pub saved_prices: BTreeMap<String, f64>,
 }
 

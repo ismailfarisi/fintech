@@ -45,10 +45,7 @@ pub struct MarketSink {
 impl MarketSink {
     /// Send an event. Fails only if the hub has shut down.
     pub async fn send(&self, event: MarketEvent) -> anyhow::Result<()> {
-        self.tx
-            .send((self.provider.clone(), event))
-            .await
-            .map_err(|_| anyhow::anyhow!("market hub closed"))
+        self.tx.send((self.provider.clone(), event)).await.map_err(|_| anyhow::anyhow!("market hub closed"))
     }
 
     /// A sink plus the receiving end, for tests of individual adapters.

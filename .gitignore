@@ -1,5 +1,6 @@
 backend/target/
-backend/data/
 node_modules/
 frontend/dist/
+.env
+*.log
 .DS_Store

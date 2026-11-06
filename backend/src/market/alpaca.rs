@@ -132,7 +132,12 @@ impl AlpacaProvider {
         Ok(Self { cfg, key_id, secret, http: net::http_client(), names: Mutex::new(HashMap::new()) })
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, base: &str, path: &str, query: &[(&str, String)]) -> anyhow::Result<T> {
+    async fn get<T: serde::de::DeserializeOwned>(
+        &self,
+        base: &str,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> anyhow::Result<T> {
         let url = format!("{}{path}", base.trim_end_matches('/'));
         let res = self
             .http
@@ -161,7 +166,8 @@ impl AlpacaProvider {
     }
 
     async fn history(&self, symbol: &str) -> anyhow::Result<Vec<PricePoint>> {
-        let start = (Utc::now() - chrono::Duration::days(HISTORY_LOOKBACK_DAYS)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let start = (Utc::now() - chrono::Duration::days(HISTORY_LOOKBACK_DAYS))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let resp: BarsResponse = self
             .get(
                 &self.cfg.data_url,
@@ -194,7 +200,10 @@ impl AlpacaProvider {
         let mut events = Vec::new();
         for symbol in &self.cfg.symbols {
             let Some(snap) = snaps.get(symbol) else {
-                tracing::warn!("alpaca: no snapshot for {symbol} (unknown symbol or no data on feed {})", self.cfg.feed);
+                tracing::warn!(
+                    "alpaca: no snapshot for {symbol} (unknown symbol or no data on feed {})",
+                    self.cfg.feed
+                );
                 continue;
             };
             let history = self.history(symbol).await.unwrap_or_else(|e| {
@@ -216,7 +225,8 @@ impl AlpacaProvider {
         let auth = serde_json::json!({ "action": "auth", "key": self.key_id, "secret": self.secret });
         ws.send(Message::Text(auth.to_string().into())).await?;
         expect_control(&mut ws, "authenticated").await?;
-        let sub = serde_json::json!({ "action": "subscribe", "trades": self.cfg.symbols, "dailyBars": self.cfg.symbols });
+        let sub =
+            serde_json::json!({ "action": "subscribe", "trades": self.cfg.symbols, "dailyBars": self.cfg.symbols });
         ws.send(Message::Text(sub.to_string().into())).await?;
         Ok(ws)
     }
@@ -462,7 +472,8 @@ mod tests {
         const SECRET: &str = "s3cret";
 
         fn authed(h: &HeaderMap) -> bool {
-            h.get("APCA-API-KEY-ID").is_some_and(|v| v == KEY) && h.get("APCA-API-SECRET-KEY").is_some_and(|v| v == SECRET)
+            h.get("APCA-API-KEY-ID").is_some_and(|v| v == KEY)
+                && h.get("APCA-API-SECRET-KEY").is_some_and(|v| v == SECRET)
         }
 
         async fn serve() -> String {
@@ -535,7 +546,10 @@ mod tests {
             let addr = serve().await;
             let p = std::sync::Arc::new(provider(&addr, SECRET));
             let (sink, mut rx) = MarketSink::channel("alpaca");
-            let task = tokio::spawn({ let p = p.clone(); async move { p.run(sink).await } });
+            let task = tokio::spawn({
+                let p = p.clone();
+                async move { p.run(sink).await }
+            });
 
             async fn recv(rx: &mut tokio::sync::mpsc::Receiver<(String, MarketEvent)>) -> MarketEvent {
                 tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap().1

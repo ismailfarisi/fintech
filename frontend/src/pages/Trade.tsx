@@ -86,7 +86,7 @@ export function Trade({ symbol, go }: { symbol?: string; go: (path: string) => v
         ))}
         {unhealthy.map((p) => (
           <p key={p.id} className="provider-note">
-            <strong>{sourceLabel(p.id)}</strong>: {p.state}{p.last_error ? ` (${p.last_error})` : ''}
+            <strong>{sourceLabel(p.id)}</strong>: {p.state}
           </p>
         ))}
       </aside>

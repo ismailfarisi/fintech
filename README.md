@@ -1,22 +1,25 @@
-# Ledger: personal portfolio & paper-trading app
+# Ledger: portfolio & paper trading
 
-A personal portfolio tracker and paper-trading app with a **Rust** backend and a **React + TypeScript** frontend.
-Prices are **live**: crypto from Coinbase (no account needed) and US stocks from Alpaca (free account).
-Trades are paper trades: they fill against real prices in the app's own engine, and no real money moves.
+A multi-user portfolio tracker and paper-trading app. The backend is **Rust** (axum, tokio, sqlx) on **PostgreSQL**; the frontend is **React + TypeScript**.
+Prices are live: crypto from Coinbase (no key needed) and US stocks from Alpaca (free account).
+Orders fill against those real prices on a double-entry ledger, using paper money only.
 
 ```
-backend/   Rust (axum + tokio): market-data adapters, trading engine, REST + WebSocket API
-frontend/  React + Vite: portfolio dashboard, trading screen, activity & cash management
+backend/    Rust API: domain · services · repositories · market-data adapters · jobs
+  migrations/   PostgreSQL schema (applied automatically on startup)
+  tests/        integration tests against a real database
+frontend/   React SPA (Vite)
+docs/       ARCHITECTURE.md: layers, money model, concurrency, how to extend
+SECURITY.md threat model, controls, production checklist
 ```
 
 ## Features
 
-- **Portfolio dashboard**: total equity, all-time P&L against money invested, realized and unrealized P&L, an equity curve, holdings with cost basis, and allocation.
-- **Trading**: market and limit orders, buy and sell. Resting limit orders reserve cash or shares and fill automatically when the price crosses the limit. Orders can be cancelled.
-- **Live market data** from pluggable adapters (Coinbase, Alpaca, or an offline simulator), streamed to the browser over a WebSocket (`/ws`). Includes a price chart per instrument, watchlist starring, search, and per-feed health status.
-- **Fractional quantities** using each instrument's lot size (e.g. 0.00000001 BTC, 0.1 DOGE, whole shares for stocks by default).
-- **Activity**: trade blotter, order history, deposits and withdrawals, and account reset.
-- **Persistence**: the account and last prices are saved to a JSON file (written atomically) and restored on restart.
+- **Accounts and security:** sign-up and sign-in with Argon2id-hashed passwords, plus hardened session cookies that expire after inactivity and can be revoked per device. Users get a security activity log. See [SECURITY.md](SECURITY.md).
+- **Portfolio:** equity, all-time / realized / unrealized P&L, an equity curve, holdings with cost basis, and allocation.
+- **Trading:** market and limit orders with fractional quantities using each instrument's lot size. Limit orders reserve funds, are matched automatically and can be cancelled. Retries are safe thanks to idempotency keys.
+- **Correct money:** exact decimals end to end, and a double-entry ledger whose invariants (balanced entries, no overdrafts, immutable history) are enforced by PostgreSQL itself. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- **Live data:** pluggable market-data adapters, streamed to the browser over an authenticated WebSocket.
 
 ## Market data
 
@@ -28,13 +31,9 @@ Providers are configured in [`backend/markets.toml`](backend/markets.toml):
 | `alpaca` | US stocks and ETFs | Free account | `iex` feed is free and real-time but only covers IEX volume; `sip` needs a paid plan |
 | `simulated` | Fictional stocks | No | Offline demos; random-walk prices |
 
-**Alpaca setup:** create a free account at [alpaca.markets](https://alpaca.markets), generate API keys (paper keys work), and start the backend with:
+**Alpaca setup:** create a free account at [alpaca.markets](https://alpaca.markets), generate API keys (paper keys work), and put them in `.env` as `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`.
 
-```sh
-export ALPACA_API_KEY_ID=...  ALPACA_API_SECRET_KEY=...
-```
-
-Without the keys, Alpaca is skipped with a warning and everything else keeps working. If no provider can start at all, the backend falls back to the simulator. Feed health (live, reconnecting, last error) is shown on the Activity page and at `GET /api/providers`.
+Without the keys, Alpaca is skipped with a warning and everything else keeps working. If no provider can start at all, the backend falls back to the simulator. Feed health is shown on the Activity page and at `GET /api/v1/market/providers`; error details go to the server log only.
 
 ### Adding a provider
 
@@ -62,59 +61,75 @@ To add one:
 
 ## Running
 
-Requirements: Rust (stable) and Node 20+.
-
-**Development** (hot reload, with Vite proxying `/api` and `/ws` to the backend):
+### With Docker (simplest)
 
 ```sh
-cd backend && cargo run              # http://localhost:8080
-cd frontend && npm install && npm run dev   # http://localhost:5173
+cp .env.example .env          # then set POSTGRES_PASSWORD (and Alpaca keys if you have them)
+docker compose up --build     # http://localhost:8080
 ```
 
-**Single binary serving the built UI:**
+### For development
+
+Requirements: Rust (stable), Node 22+, PostgreSQL 16 (or `docker compose up db`).
 
 ```sh
-cd frontend && npm install && npm run build
-cd ../backend && cargo run --release   # open http://localhost:8080
+cp .env.example .env                 # DATABASE_URL must point at your Postgres
+cd backend && cargo run              # API on http://localhost:8080 (runs migrations)
+cd frontend && npm install && npm run dev   # UI on http://localhost:5173, proxied to the API
 ```
 
-### Backend configuration (env vars)
+To serve the built UI from the backend instead, run `npm run build` in `frontend/` and open http://localhost:8080.
 
-| Variable     | Default              | Meaning                                  |
-|--------------|----------------------|------------------------------------------|
-| `PORT`       | `8080`               | HTTP port                                |
-| `DATA_FILE`  | `data/account.json`  | Where the account is persisted           |
-| `STATIC_DIR` | `../frontend/dist`   | Built frontend to serve (if present)     |
-| `MARKETS_CONFIG` | `markets.toml`   | Market-data provider config              |
-| `TICK_MS`    | `1000`               | Order-matching / UI push interval (ms)   |
-| `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY` | (unset) | Alpaca credentials (also accepts `APCA_*`) |
+### Tests
 
-## API
+```sh
+cd backend
+DATABASE_URL=postgres://ledger:...@localhost:5432/ledger cargo test   # needs CREATEDB; each test gets a fresh database
+cargo clippy --all-targets -- -D warnings && cargo fmt --check
+cargo deny check                                                      # advisories, licenses, sources
+```
 
-| Method | Path | Description |
+CI (`.github/workflows/ci.yml`) runs all of these, plus the frontend lint, build and `npm audit`, and a Docker build.
+
+### Configuration
+
+All settings are environment variables; see [`.env.example`](.env.example) for the full list with explanations. The important ones:
+
+| Variable | Default | |
 |---|---|---|
-| GET | `/api/providers` | Market-data feed status |
-| GET | `/api/quotes` | All quotes (symbols that have a price) |
-| GET | `/api/quotes/{symbol}` | Quote + recent price history |
-| GET | `/api/portfolio` | Cash, equity, P&L, positions |
-| GET | `/api/portfolio/history` | Equity curve |
-| GET | `/api/orders?status=open\|filled\|cancelled` | Orders, newest first |
-| POST | `/api/orders` | `{symbol, side: buy\|sell, kind: market\|limit, qty, limit_price?}` |
-| DELETE | `/api/orders/{id}` | Cancel an open order |
-| GET | `/api/trades` | Executions |
-| GET | `/api/cash` | Deposits and withdrawals |
-| POST | `/api/cash/deposit`, `/api/cash/withdraw` | `{amount}` |
-| GET / PUT / DELETE | `/api/watchlist[/{symbol}]` | Watchlist |
-| POST | `/api/account/reset` | `{starting_cash?}` (default $100,000) |
-| WS | `/ws` | Events: `tick` (quotes + portfolio), `fill`, `account_changed` |
+| `DATABASE_URL` | (required) | PostgreSQL connection string |
+| `PUBLIC_ORIGIN` | `http://localhost:8080` | The URL users open. Other origins can't make state-changing requests. |
+| `ALLOWED_ORIGINS` | (none) | Extra origins, e.g. `http://localhost:5173` for the Vite dev server |
+| `COOKIE_SECURE` | `true` | Keep `true` (works on http://localhost too) |
+| `TRUST_PROXY_HEADERS` | `false` | Only behind your own reverse proxy |
+| `SESSION_IDLE_MINUTES` / `SESSION_ABSOLUTE_HOURS` | `30` / `12` | Session lifetime |
+| `STARTING_CASH` / `TRADING_FEE_BPS` | `100000` / `0` | Paper account funding and simulated fees |
 
-Errors return `{"error": "..."}` with 404 (unknown symbol/order), 409 (order not open) or 422 (validation, insufficient funds or shares).
+## API (v1)
 
-## Design notes
+All routes are under `/api/v1`. Authentication is by session cookie. Money is sent and returned as decimal strings. Errors look like `{"error": {"code": "insufficient_funds", "message": "..."}}`.
 
-- `engine.rs` is pure. It takes prices and timestamps as inputs, has no I/O, and is unit-tested (`cargo test`).
-- Quantities are fractional (8 decimals) and must be a multiple of the instrument's lot size. Cash is rounded to cents after every operation.
-- Fills: market orders fill at the last trade price. Marketable limit orders fill immediately at the market price. Resting limits fill at the first tick that crosses them, at that tick's price, which is never worse than the limit. There's no simulated spread, slippage or fees, and fills ignore market hours (outside trading hours you trade at the last price).
-- Positions are valued at the live price, or the last saved price while a feed is connecting. Limit orders match on live prices only.
-- If you remove a symbol from `markets.toml`, existing positions in it stay, valued at their last saved price, but can't be traded.
-- Single-user and unauthenticated, meant to run locally. Add authentication before exposing it to a network.
+| Method | Path | |
+|---|---|---|
+| POST | `/auth/register`, `/auth/login`, `/auth/logout` | Sign up, sign in, sign out |
+| GET | `/auth/me` | Current user and accounts |
+| POST | `/auth/password` | Change password (signs out other sessions) |
+| GET / DELETE | `/auth/sessions[/{id}]`, POST `/auth/sessions/revoke-others` | Device sessions |
+| GET | `/auth/activity` | Your security and account activity log |
+| GET | `/market/quotes[/{symbol}]`, `/market/providers` | Market data |
+| GET / PUT / DELETE | `/watchlist[/{symbol}]` | Watchlist |
+| GET | `/accounts`, `/accounts/{id}` | Your accounts |
+| GET | `/accounts/{id}/portfolio`, `/equity`, `/trades`, `/cash`, `/reconcile` | Account data |
+| GET / POST | `/accounts/{id}/orders` | List, or place (`Idempotency-Key` supported) |
+| GET / DELETE | `/accounts/{id}/orders/{order_id}` | Get or cancel |
+| POST | `/accounts/{id}/cash/deposits`, `/cash/withdrawals` | Move paper cash (`Idempotency-Key` supported) |
+| POST | `/accounts/{id}/reset` | Close the account and open a fresh one |
+| GET (WS) | `/ws?account_id=...` | Live `tick` (quotes + portfolio) and `account` events |
+
+Health checks: `GET /healthz` (process up) and `GET /readyz` (database reachable).
+
+## Limitations
+
+- Paper trading only: no real brokerage execution, spread, slippage or market hours. Fees are configurable and default to 0.
+- Single instance: the rate limiter and event bus are in-process (see the production checklist in SECURITY.md).
+- No email verification, password reset or 2FA yet. These are the next security features to add.

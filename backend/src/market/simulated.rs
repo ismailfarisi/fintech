@@ -85,7 +85,14 @@ impl SimulatedProvider {
         ];
         let mut walks: Vec<Walk> = seed
             .iter()
-            .map(|&(symbol, name, asset_class, price, drift, vol)| Walk { symbol, name, asset_class, price, drift, vol })
+            .map(|&(symbol, name, asset_class, price, drift, vol)| Walk {
+                symbol,
+                name,
+                asset_class,
+                price,
+                drift,
+                vol,
+            })
             .collect();
 
         // Back-fill history one point per tick interval, ending now.

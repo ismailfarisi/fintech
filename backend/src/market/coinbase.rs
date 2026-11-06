@@ -148,9 +148,7 @@ impl MarketDataProvider for CoinbaseProvider {
         }
 
         loop {
-            let msg = tokio::time::timeout(READ_TIMEOUT, ws.next())
-                .await
-                .context("no data from coinbase for 30s")?;
+            let msg = tokio::time::timeout(READ_TIMEOUT, ws.next()).await.context("no data from coinbase for 30s")?;
             let text = match msg {
                 Some(Ok(Message::Text(t))) => t,
                 Some(Ok(Message::Close(frame))) => bail!("server closed connection: {frame:?}"),
@@ -213,10 +211,8 @@ fn snapshot_event(
     name: Option<String>,
     qty_step: Option<f64>,
 ) -> MarketEvent {
-    let history = candles
-        .iter()
-        .filter_map(|c| DateTime::from_timestamp(c.0, 0).map(|t| PricePoint { t, price: c.4 }))
-        .collect();
+    let history =
+        candles.iter().filter_map(|c| DateTime::from_timestamp(c.0, 0).map(|t| PricePoint { t, price: c.4 })).collect();
     let mut update = PriceUpdate::new(product, stats.last, now);
     update.reference = Some(stats.open);
     update.high = Some(stats.high);
@@ -293,13 +289,16 @@ mod tests {
         assert!(parse_message(r#"{"type":"subscriptions","channels":[]}"#).unwrap().is_none());
         assert!(parse_message(r#"{"type":"heartbeat","product_id":"BTC-USD","sequence":1}"#).unwrap().is_none());
         assert!(parse_message("not json").unwrap().is_none());
-        let err = parse_message(r#"{"type":"error","message":"Failed to subscribe","reason":"BAD-X is not a valid product"}"#);
+        let err = parse_message(
+            r#"{"type":"error","message":"Failed to subscribe","reason":"BAD-X is not a valid product"}"#,
+        );
         assert!(err.unwrap_err().to_string().contains("BAD-X"));
     }
 
     #[test]
     fn snapshot_from_rest_payloads() {
-        let stats: Stats = serde_json::from_str(r#"{"open":"100","high":"110","low":"90","last":"105","volume":"1"}"#).unwrap();
+        let stats: Stats =
+            serde_json::from_str(r#"{"open":"100","high":"110","low":"90","last":"105","volume":"1"}"#).unwrap();
         let candles: Vec<Candle> = serde_json::from_str("[[1700000060,1,2,1,104,5],[1700000000,1,2,1,103,5]]").unwrap();
         let ev = snapshot_event("BTC-USD", &stats, &candles, Utc::now(), Some("Bitcoin".into()), Some(1e-8));
         let MarketEvent::Snapshot { update, history, name, qty_step } = ev else { panic!() };

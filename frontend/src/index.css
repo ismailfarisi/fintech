@@ -255,3 +255,21 @@ code { font-size: 12px; background: var(--surface-2); padding: 1px 4px; border-r
   .source-error { padding-left: 0; }
   .market-list { max-height: none; }
 }
+
+/* ---- auth & settings ---- */
+.signin { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+.signin-card { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 14px; padding: 28px; }
+.signin-card h1 { font-size: 20px; }
+.signin-card label { display: flex; flex-direction: column; gap: 4px; color: var(--ink-2); font-size: 13px; }
+.signin-card input, .ticket input:not([type='number']) {
+  width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--page);
+}
+.signin-brand { font-size: 18px; }
+.signin-switch { margin: 0; font-size: 13px; }
+.user { text-decoration: none; color: var(--ink-2); font-size: 13px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user.active, .user:hover { color: var(--ink); }
+.row-between { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.pill:not(.buy):not(.sell) { color: var(--ink-2); }
+@media (max-width: 760px) {
+  .hide-sm, .user { display: none; }
+}

@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
-import { api, ApiError, type CashFlow, type Order, type Trade } from '../api'
+import { api, ApiError, newIdempotencyKey, type CashFlow, type Order, type Trade } from '../api'
+import { useAuth } from '../auth'
 import { ago, dateTime, money, price, qty, signedMoney, sourceLabel, tone } from '../format'
 import { useLive } from '../live'
 
 export function Activity() {
   const { revision, refresh, portfolio, providers } = useLive()
+  const { reload } = useAuth()
   const [trades, setTrades] = useState<Trade[]>([])
   const [orders, setOrders] = useState<Order[]>([])
   const [flows, setFlows] = useState<CashFlow[]>([])
@@ -24,8 +26,8 @@ export function Activity() {
   }
 
   const reset = () => {
-    if (confirm('Reset the account? This deletes all positions, orders and history.')) {
-      run(() => api.reset(100_000))
+    if (confirm('Reset this account? Open orders are cancelled and the account is closed (its history is kept). A new account with $100,000 is opened.')) {
+      run(async () => { await api.reset(); await reload() })
     }
   }
 
@@ -37,14 +39,14 @@ export function Activity() {
           <p className="muted">Available to withdraw: {money(portfolio?.buying_power ?? 0)}</p>
           <div className="row">
             <input type="number" min={0.01} step={0.01} value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="Amount" />
-            <button onClick={() => run(() => api.deposit(Number(amount)))}>Deposit</button>
-            <button onClick={() => run(() => api.withdraw(Number(amount)))}>Withdraw</button>
+            <button onClick={() => run(() => api.deposit(amount.trim(), newIdempotencyKey()))}>Deposit</button>
+            <button onClick={() => run(() => api.withdraw(amount.trim(), newIdempotencyKey()))}>Withdraw</button>
           </div>
           {msg && <p className="notice err">{msg}</p>}
         </section>
         <section className="card">
           <h2>Account</h2>
-          <p className="muted">Paper trading: orders fill against live market prices, but no real money moves. Start over with $100,000.</p>
+          <p className="muted">Paper trading: orders fill against live market prices, but no real money moves. Resetting closes this account (its history is kept) and opens a fresh one with $100,000.</p>
           <button className="danger" onClick={reset}>Reset account</button>
         </section>
       </div>
@@ -57,13 +59,12 @@ export function Activity() {
               <li key={p.id}>
                 <span className={`source-state ${p.state}`}>{p.state === 'live' ? '●' : '○'} {p.state}</span>
                 <strong>{sourceLabel(p.id)}</strong>
-                <small>{p.symbols.length} symbols{p.last_event_at ? ` · last update ${ago(p.last_event_at)}` : ''}{p.reconnects ? ` · ${p.reconnects} reconnects` : ''}</small>
-                {p.last_error && p.state !== 'live' && <span className="source-error">{p.last_error}</span>}
+                <small>{p.symbols} symbols{p.last_event_at ? ` · last update ${ago(p.last_event_at)}` : ''}</small>
               </li>
             ))}
           </ul>
         )}
-        <p className="muted small-print">Configure providers in <code>backend/markets.toml</code>. Alpaca needs <code>ALPACA_API_KEY_ID</code> and <code>ALPACA_API_SECRET_KEY</code>.</p>
+        <p className="muted small-print">Feeds are configured by the server operator. Error details are in the server logs.</p>
       </section>
 
       <section className="card">
