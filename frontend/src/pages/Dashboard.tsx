@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, type EquityPoint } from '../api'
 import { LineChart } from '../components/LineChart'
 import { Stat } from '../components/Stat'
-import { money, moneyCompact, pct, signedMoney, tone } from '../format'
+import { money, moneyCompact, pct, price, qty, signedMoney, tone } from '../format'
 import { useLive } from '../live'
 
 export function Dashboard({ go }: { go: (path: string) => void }) {
@@ -67,9 +67,9 @@ export function Dashboard({ go }: { go: (path: string) => void }) {
                 {p.positions.map((x) => (
                   <tr key={x.symbol} className="clickable" onClick={() => go(`/trade/${x.symbol}`)}>
                     <td><strong>{x.symbol}</strong></td>
-                    <td className="num">{x.qty}</td>
-                    <td className="num">{money(x.avg_cost)}</td>
-                    <td className="num">{money(x.price)}</td>
+                    <td className="num">{qty(x.qty)}</td>
+                    <td className="num">{price(x.avg_cost)}</td>
+                    <td className="num">{price(x.price)}</td>
                     <td className="num">{money(x.market_value)}</td>
                     <td className={`num ${tone(x.unrealized_pnl)}`}>
                       {signedMoney(x.unrealized_pnl)}<br /><small>{pct(x.unrealized_pnl_pct)}</small>
@@ -86,7 +86,7 @@ export function Dashboard({ go }: { go: (path: string) => void }) {
           <ul className="bars">
             {allocation.map((a) => (
               <li key={a.label} title={`${a.label}: ${money(a.value)}`}>
-                <span className="bar-label">{a.label}</span>
+                <span className="bar-label" title={a.label}>{a.label}</span>
                 <span className="bar-track"><span className={`bar-fill ${a.label === 'Cash' ? 'cash' : ''}`} style={{ width: `${Math.max(a.weight, 0.5)}%` }} /></span>
                 <span className="bar-value">{a.weight.toFixed(1)}%</span>
               </li>

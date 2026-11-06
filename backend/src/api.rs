@@ -15,12 +15,14 @@ use crate::engine::{
     Account, CashFlow, EngineError, EquityPoint, Order, OrderRequest, OrderStatus,
     PortfolioSummary, Trade, DEFAULT_STARTING_CASH,
 };
+use crate::market::hub::ProviderStatus;
 use crate::market::{PricePoint, Quote};
 use crate::state::{Event, SharedState};
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/api/providers", get(list_providers))
         .route("/api/quotes", get(list_quotes))
         .route("/api/quotes/{symbol}", get(get_quote))
         .route("/api/portfolio", get(get_portfolio))
@@ -62,10 +64,14 @@ impl From<EngineError> for ApiError {
 type ApiResult<T> = Result<Json<T>, ApiError>;
 
 fn prices(state: &SharedState) -> std::collections::BTreeMap<String, f64> {
-    state.market.read().unwrap().prices()
+    state.valuation_prices()
 }
 
 // ---- market --------------------------------------------------------------
+
+async fn list_providers(State(state): State<SharedState>) -> Json<Vec<ProviderStatus>> {
+    Json(state.providers.read().unwrap().values().cloned().collect())
+}
 
 async fn list_quotes(State(state): State<SharedState>) -> Json<Vec<Quote>> {
     Json(state.market.read().unwrap().quotes())
@@ -81,7 +87,7 @@ async fn get_quote(State(state): State<SharedState>, Path(symbol): Path<String>)
     let symbol = symbol.to_uppercase();
     let market = state.market.read().unwrap();
     let not_found = || ApiError(StatusCode::NOT_FOUND, format!("unknown symbol '{symbol}'"));
-    let quote = market.quotes().into_iter().find(|q| q.symbol == symbol).ok_or_else(not_found)?;
+    let quote = market.quote(&symbol).ok_or_else(not_found)?;
     let history = market.history(&symbol).ok_or_else(not_found)?;
     Ok(Json(QuoteDetail { quote, history }))
 }
@@ -126,8 +132,8 @@ async fn place_order(
     State(state): State<SharedState>,
     Json(req): Json<OrderRequest>,
 ) -> Result<(StatusCode, Json<PlaceOrderResponse>), ApiError> {
-    let price = state.market.read().unwrap().price(&req.symbol.trim().to_uppercase());
-    let (order, trade) = state.account.lock().unwrap().place_order(req, price, Utc::now())?;
+    let market = state.market.read().unwrap().tradable(&req.symbol.trim().to_uppercase());
+    let (order, trade) = state.account.lock().unwrap().place_order(req, market, Utc::now())?;
     state.save();
     if let Some(t) = &trade {
         state.notify(Event::Fill { trade: t.clone() });
@@ -260,11 +266,30 @@ async fn ws_session(mut socket: WebSocket, state: SharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market::config::BuildContext;
+    use crate::market::provider::MarketDataProvider;
+    use crate::market::simulated::{SimulatedConfig, SimulatedProvider};
     use crate::state::AppState;
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    /// App with the simulator's instruments loaded synchronously.
+    fn app() -> Router {
+        let state = AppState::new(None);
+        let sim = SimulatedProvider::new(SimulatedConfig::default(), &BuildContext::default().saved_prices);
+        {
+            let mut store = state.market.write().unwrap();
+            for inst in sim.instruments() {
+                store.register(inst, 1);
+            }
+            for ev in sim.snapshots() {
+                store.apply(ev);
+            }
+        }
+        router(state)
+    }
 
     async fn call(app: &Router, method: &str, uri: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
         let mut req = Request::builder().method(method).uri(uri);
@@ -284,7 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn order_flow_over_http() {
-        let app = router(AppState::new(None));
+        let app = app();
 
         let (s, quotes) = call(&app, "GET", "/api/quotes", None).await;
         assert_eq!(s, StatusCode::OK);
@@ -297,7 +322,7 @@ mod tests {
         assert_eq!(body["trade"]["symbol"], "NOVA");
 
         let (_, p) = call(&app, "GET", "/api/portfolio", None).await;
-        assert_eq!(p["positions"][0]["qty"], 3);
+        assert_eq!(p["positions"][0]["qty"].as_f64(), Some(3.0));
 
         let (s, body) = call(&app, "POST", "/api/orders",
             Some(json!({"symbol": "NOVA", "side": "sell", "kind": "market", "qty": 99}))).await;
@@ -319,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_symbols_are_404() {
-        let app = router(AppState::new(None));
+        let app = app();
         let (s, _) = call(&app, "GET", "/api/quotes/ZZZZ", None).await;
         assert_eq!(s, StatusCode::NOT_FOUND);
         let (s, _) = call(&app, "PUT", "/api/watchlist/ZZZZ", None).await;
@@ -331,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn cash_and_reset() {
-        let app = router(AppState::new(None));
+        let app = app();
         let (s, p) = call(&app, "POST", "/api/cash/deposit", Some(json!({"amount": 2500}))).await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(p["cash"], 102_500.0);

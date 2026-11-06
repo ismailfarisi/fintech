@@ -10,11 +10,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::market::round_cents;
+use crate::market::{Tradable, round_cents, round_price};
 
 pub const DEFAULT_STARTING_CASH: f64 = 100_000.0;
 const EQUITY_HISTORY_LEN: usize = 2_000;
 const EPS: f64 = 1e-9;
+/// Quantities are kept to 8 decimals (satoshi precision).
+const QTY_EPS: f64 = 1e-9;
+
+fn round_qty(q: f64) -> f64 {
+    (q * 1e8).round() / 1e8 + 0.0
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,7 +50,7 @@ pub struct Order {
     pub symbol: String,
     pub side: Side,
     pub kind: OrderKind,
-    pub qty: u64,
+    pub qty: f64,
     pub limit_price: Option<f64>,
     pub status: OrderStatus,
     pub created_at: DateTime<Utc>,
@@ -58,7 +64,7 @@ pub struct Trade {
     pub order_id: Uuid,
     pub symbol: String,
     pub side: Side,
-    pub qty: u64,
+    pub qty: f64,
     pub price: f64,
     pub total: f64,
     /// Realised P&L for sells; `None` for buys.
@@ -68,7 +74,7 @@ pub struct Trade {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Position {
-    pub qty: u64,
+    pub qty: f64,
     pub avg_cost: f64,
 }
 
@@ -98,7 +104,7 @@ pub struct OrderRequest {
     pub symbol: String,
     pub side: Side,
     pub kind: OrderKind,
-    pub qty: u64,
+    pub qty: f64,
     pub limit_price: Option<f64>,
 }
 
@@ -108,7 +114,8 @@ pub enum EngineError {
     InvalidLimitPrice,
     UnknownSymbol(String),
     InsufficientFunds { needed: f64, available: f64 },
-    InsufficientShares { needed: u64, available: u64 },
+    InsufficientShares { needed: f64, available: f64 },
+    QtyIncrement(f64),
     InvalidAmount,
     OrderNotFound,
     OrderNotOpen,
@@ -128,6 +135,7 @@ impl fmt::Display for EngineError {
                 f,
                 "insufficient shares: need {needed}, have {available} available to sell"
             ),
+            Self::QtyIncrement(step) => write!(f, "quantity must be a multiple of {step}"),
             Self::InvalidAmount => write!(f, "amount must be a positive number"),
             Self::OrderNotFound => write!(f, "order not found"),
             Self::OrderNotOpen => write!(f, "order is no longer open"),
@@ -154,7 +162,7 @@ pub struct Account {
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionView {
     pub symbol: String,
-    pub qty: u64,
+    pub qty: f64,
     pub avg_cost: f64,
     pub price: f64,
     pub market_value: f64,
@@ -236,7 +244,7 @@ impl Account {
     pub fn reserved_cash(&self) -> f64 {
         self.open_orders()
             .filter(|o| o.side == Side::Buy)
-            .map(|o| o.qty as f64 * o.limit_price.unwrap_or(0.0))
+            .map(|o| o.qty * o.limit_price.unwrap_or(0.0))
             .sum()
     }
 
@@ -246,14 +254,14 @@ impl Account {
     }
 
     /// Shares of `symbol` held but not committed to resting sell orders.
-    pub fn sellable_qty(&self, symbol: &str) -> u64 {
-        let held = self.positions.get(symbol).map_or(0, |p| p.qty);
-        let reserved: u64 = self
+    pub fn sellable_qty(&self, symbol: &str) -> f64 {
+        let held = self.positions.get(symbol).map_or(0.0, |p| p.qty);
+        let reserved: f64 = self
             .open_orders()
             .filter(|o| o.side == Side::Sell && o.symbol == symbol)
             .map(|o| o.qty)
             .sum();
-        held.saturating_sub(reserved)
+        round_qty((held - reserved).max(0.0))
     }
 
     pub fn open_orders(&self) -> impl Iterator<Item = &Order> {
@@ -262,24 +270,31 @@ impl Account {
 
     // ---- orders ----------------------------------------------------------
 
-    /// Place an order. `market_price` is the current price of the symbol, or
+    /// Place an order. `market` is the symbol's current price and lot size, or
     /// `None` if the symbol isn't tradable. Returns the order and any trade
     /// produced by an immediate fill.
     pub fn place_order(
         &mut self,
-        req: OrderRequest,
-        market_price: Option<f64>,
+        mut req: OrderRequest,
+        market: Option<Tradable>,
         now: DateTime<Utc>,
     ) -> Result<(Order, Option<Trade>), EngineError> {
         let symbol = req.symbol.trim().to_uppercase();
-        let price = market_price.ok_or_else(|| EngineError::UnknownSymbol(symbol.clone()))?;
-        if req.qty == 0 {
+        let Tradable { price, qty_step } = market.ok_or_else(|| EngineError::UnknownSymbol(symbol.clone()))?;
+        if !(req.qty.is_finite() && req.qty > QTY_EPS) {
             return Err(EngineError::InvalidQuantity);
         }
+        if qty_step > 0.0 {
+            let steps = req.qty / qty_step;
+            if (steps - steps.round()).abs() > 1e-6 {
+                return Err(EngineError::QtyIncrement(qty_step));
+            }
+        }
+        req.qty = round_qty(req.qty);
         let limit_price = match req.kind {
             OrderKind::Market => None,
             OrderKind::Limit => match req.limit_price {
-                Some(p) if p.is_finite() && p > 0.0 => Some(round_cents(p)),
+                Some(p) if p.is_finite() && p > 0.0 => Some(round_price(p)),
                 _ => return Err(EngineError::InvalidLimitPrice),
             },
         };
@@ -297,7 +312,7 @@ impl Account {
             Side::Buy => {
                 // A resting limit reserves qty * limit; an immediate fill costs qty * price.
                 let per_share = if marketable { price } else { limit_price.unwrap() };
-                let needed = round_cents(req.qty as f64 * per_share);
+                let needed = round_cents(req.qty * per_share);
                 let available = self.buying_power();
                 if needed > available + EPS {
                     return Err(EngineError::InsufficientFunds { needed, available });
@@ -305,7 +320,7 @@ impl Account {
             }
             Side::Sell => {
                 let available = self.sellable_qty(&symbol);
-                if req.qty > available {
+                if req.qty > available + QTY_EPS {
                     return Err(EngineError::InsufficientShares { needed: req.qty, available });
                 }
             }
@@ -357,7 +372,7 @@ impl Account {
             }
             // Sells can become unfillable if shares were sold elsewhere — sellable_qty
             // reservations prevent that, but guard anyway.
-            if o.side == Side::Sell && self.positions.get(&o.symbol).map_or(0, |p| p.qty) < o.qty {
+            if o.side == Side::Sell && self.positions.get(&o.symbol).map_or(0.0, |p| p.qty) < o.qty - QTY_EPS {
                 self.orders[i].status = OrderStatus::Cancelled;
                 continue;
             }
@@ -370,7 +385,7 @@ impl Account {
 
     /// Execute `order` in full at `price`, updating cash and positions.
     fn fill(&mut self, order: &mut Order, price: f64, now: DateTime<Utc>) -> Trade {
-        let total = round_cents(order.qty as f64 * price);
+        let total = round_cents(order.qty * price);
         let mut realized = None;
         match order.side {
             Side::Buy => {
@@ -378,19 +393,19 @@ impl Account {
                 let pos = self
                     .positions
                     .entry(order.symbol.clone())
-                    .or_insert(Position { qty: 0, avg_cost: 0.0 });
-                let new_qty = pos.qty + order.qty;
-                pos.avg_cost = (pos.qty as f64 * pos.avg_cost + total) / new_qty as f64;
+                    .or_insert(Position { qty: 0.0, avg_cost: 0.0 });
+                let new_qty = round_qty(pos.qty + order.qty);
+                pos.avg_cost = (pos.qty * pos.avg_cost + total) / new_qty;
                 pos.qty = new_qty;
             }
             Side::Sell => {
                 self.cash = round_cents(self.cash + total);
                 let pos = self.positions.get_mut(&order.symbol).expect("validated position");
-                let pnl = round_cents((price - pos.avg_cost) * order.qty as f64);
+                let pnl = round_cents((price - pos.avg_cost) * order.qty);
                 self.realized_pnl = round_cents(self.realized_pnl + pnl);
                 realized = Some(pnl);
-                pos.qty -= order.qty;
-                if pos.qty == 0 {
+                pos.qty = round_qty(pos.qty - order.qty);
+                if pos.qty <= QTY_EPS {
                     self.positions.remove(&order.symbol);
                 }
             }
@@ -421,8 +436,8 @@ impl Account {
             .iter()
             .map(|(sym, p)| {
                 let price = prices.get(sym).copied().unwrap_or(p.avg_cost);
-                let market_value = round_cents(p.qty as f64 * price);
-                let cost_basis = round_cents(p.qty as f64 * p.avg_cost);
+                let market_value = round_cents(p.qty * price);
+                let cost_basis = round_cents(p.qty * p.avg_cost);
                 let unrealized = round_cents(market_value - cost_basis);
                 PositionView {
                     symbol: sym.clone(),
@@ -494,12 +509,17 @@ mod tests {
         Account::new(cash, now())
     }
 
-    fn market(sym: &str, side: Side, qty: u64) -> OrderRequest {
-        OrderRequest { symbol: sym.into(), side, kind: OrderKind::Market, qty, limit_price: None }
+    fn market(sym: &str, side: Side, qty: impl Into<f64>) -> OrderRequest {
+        OrderRequest { symbol: sym.into(), side, kind: OrderKind::Market, qty: qty.into(), limit_price: None }
     }
 
-    fn limit(sym: &str, side: Side, qty: u64, px: f64) -> OrderRequest {
-        OrderRequest { symbol: sym.into(), side, kind: OrderKind::Limit, qty, limit_price: Some(px) }
+    fn limit(sym: &str, side: Side, qty: impl Into<f64>, px: f64) -> OrderRequest {
+        OrderRequest { symbol: sym.into(), side, kind: OrderKind::Limit, qty: qty.into(), limit_price: Some(px) }
+    }
+
+    /// Whole-share instrument at `price`.
+    fn px(price: f64) -> Option<Tradable> {
+        Some(Tradable { price, qty_step: 1.0 })
     }
 
     fn prices(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
@@ -509,28 +529,28 @@ mod tests {
     #[test]
     fn market_buy_updates_cash_and_position() {
         let mut a = acct(10_000.0);
-        let (o, t) = a.place_order(market("NOVA", Side::Buy, 10), Some(100.0), now()).unwrap();
+        let (o, t) = a.place_order(market("NOVA", Side::Buy, 10), px(100.0), now()).unwrap();
         assert_eq!(o.status, OrderStatus::Filled);
         assert_eq!(t.unwrap().total, 1000.0);
         assert_eq!(a.cash, 9_000.0);
-        assert_eq!(a.positions["NOVA"].qty, 10);
+        assert_eq!(a.positions["NOVA"].qty, 10.0);
         assert_eq!(a.positions["NOVA"].avg_cost, 100.0);
     }
 
     #[test]
     fn average_cost_is_weighted() {
         let mut a = acct(10_000.0);
-        a.place_order(market("NOVA", Side::Buy, 10), Some(100.0), now()).unwrap();
-        a.place_order(market("NOVA", Side::Buy, 30), Some(120.0), now()).unwrap();
-        assert_eq!(a.positions["NOVA"].qty, 40);
+        a.place_order(market("NOVA", Side::Buy, 10), px(100.0), now()).unwrap();
+        a.place_order(market("NOVA", Side::Buy, 30), px(120.0), now()).unwrap();
+        assert_eq!(a.positions["NOVA"].qty, 40.0);
         assert!((a.positions["NOVA"].avg_cost - 115.0).abs() < 1e-9);
     }
 
     #[test]
     fn sell_realizes_pnl_and_closes_position() {
         let mut a = acct(10_000.0);
-        a.place_order(market("NOVA", Side::Buy, 10), Some(100.0), now()).unwrap();
-        let (_, t) = a.place_order(market("NOVA", Side::Sell, 10), Some(110.0), now()).unwrap();
+        a.place_order(market("NOVA", Side::Buy, 10), px(100.0), now()).unwrap();
+        let (_, t) = a.place_order(market("NOVA", Side::Sell, 10), px(110.0), now()).unwrap();
         assert_eq!(t.unwrap().realized_pnl, Some(100.0));
         assert_eq!(a.realized_pnl, 100.0);
         assert_eq!(a.cash, 10_100.0);
@@ -540,10 +560,10 @@ mod tests {
     #[test]
     fn rejects_overspend_and_oversell() {
         let mut a = acct(1_000.0);
-        let err = a.place_order(market("NOVA", Side::Buy, 11), Some(100.0), now()).unwrap_err();
+        let err = a.place_order(market("NOVA", Side::Buy, 11), px(100.0), now()).unwrap_err();
         assert!(matches!(err, EngineError::InsufficientFunds { .. }));
-        let err = a.place_order(market("NOVA", Side::Sell, 1), Some(100.0), now()).unwrap_err();
-        assert_eq!(err, EngineError::InsufficientShares { needed: 1, available: 0 });
+        let err = a.place_order(market("NOVA", Side::Sell, 1), px(100.0), now()).unwrap_err();
+        assert_eq!(err, EngineError::InsufficientShares { needed: 1.0, available: 0.0 });
         assert!(a.orders.is_empty(), "rejected orders are not recorded");
     }
 
@@ -551,11 +571,11 @@ mod tests {
     fn rejects_bad_inputs() {
         let mut a = acct(1_000.0);
         assert_eq!(
-            a.place_order(market("NOVA", Side::Buy, 0), Some(10.0), now()).unwrap_err(),
+            a.place_order(market("NOVA", Side::Buy, 0), px(10.0), now()).unwrap_err(),
             EngineError::InvalidQuantity
         );
         assert_eq!(
-            a.place_order(limit("NOVA", Side::Buy, 1, -5.0), Some(10.0), now()).unwrap_err(),
+            a.place_order(limit("NOVA", Side::Buy, 1, -5.0), px(10.0), now()).unwrap_err(),
             EngineError::InvalidLimitPrice
         );
         assert!(matches!(
@@ -567,12 +587,12 @@ mod tests {
     #[test]
     fn resting_buy_limit_reserves_cash_then_fills_when_price_drops() {
         let mut a = acct(1_000.0);
-        let (o, t) = a.place_order(limit("NOVA", Side::Buy, 5, 90.0), Some(100.0), now()).unwrap();
+        let (o, t) = a.place_order(limit("NOVA", Side::Buy, 5, 90.0), px(100.0), now()).unwrap();
         assert!(t.is_none());
         assert_eq!(o.status, OrderStatus::Open);
         assert_eq!(a.buying_power(), 550.0);
         // Can't spend the reserved cash elsewhere.
-        assert!(a.place_order(market("QBIT", Side::Buy, 6), Some(100.0), now()).is_err());
+        assert!(a.place_order(market("QBIT", Side::Buy, 6), px(100.0), now()).is_err());
 
         // Price above the limit: nothing happens.
         assert!(a.on_prices(&prices(&[("NOVA", 95.0)]), now()).is_empty());
@@ -588,7 +608,7 @@ mod tests {
     #[test]
     fn marketable_limit_fills_immediately() {
         let mut a = acct(1_000.0);
-        let (o, t) = a.place_order(limit("NOVA", Side::Buy, 1, 120.0), Some(100.0), now()).unwrap();
+        let (o, t) = a.place_order(limit("NOVA", Side::Buy, 1, 120.0), px(100.0), now()).unwrap();
         assert_eq!(o.status, OrderStatus::Filled);
         assert_eq!(t.unwrap().price, 100.0);
     }
@@ -596,22 +616,40 @@ mod tests {
     #[test]
     fn sell_limit_reserves_shares_and_can_be_cancelled() {
         let mut a = acct(1_000.0);
-        a.place_order(market("NOVA", Side::Buy, 5), Some(100.0), now()).unwrap();
-        let (o, _) = a.place_order(limit("NOVA", Side::Sell, 3, 150.0), Some(100.0), now()).unwrap();
-        assert_eq!(a.sellable_qty("NOVA"), 2);
-        assert!(a.place_order(market("NOVA", Side::Sell, 3), Some(100.0), now()).is_err());
+        a.place_order(market("NOVA", Side::Buy, 5), px(100.0), now()).unwrap();
+        let (o, _) = a.place_order(limit("NOVA", Side::Sell, 3, 150.0), px(100.0), now()).unwrap();
+        assert_eq!(a.sellable_qty("NOVA"), 2.0);
+        assert!(a.place_order(market("NOVA", Side::Sell, 3), px(100.0), now()).is_err());
 
         a.cancel_order(o.id).unwrap();
-        assert_eq!(a.sellable_qty("NOVA"), 5);
+        assert_eq!(a.sellable_qty("NOVA"), 5.0);
         assert_eq!(a.cancel_order(o.id).unwrap_err(), EngineError::OrderNotOpen);
         assert_eq!(a.cancel_order(Uuid::new_v4()).unwrap_err(), EngineError::OrderNotFound);
     }
 
     #[test]
+    fn fractional_quantities_respect_lot_size() {
+        let mut a = acct(100_000.0);
+        let btc = Some(Tradable { price: 75_000.0, qty_step: 1e-8 });
+        let (_, t) = a.place_order(market("BTC-USD", Side::Buy, 0.0125), btc, now()).unwrap();
+        assert_eq!(t.unwrap().total, 937.5);
+        assert_eq!(a.positions["BTC-USD"].qty, 0.0125);
+        // 0.1 + 0.2 style float noise must not leave dust behind.
+        a.place_order(market("BTC-USD", Side::Sell, 0.0025), btc, now()).unwrap();
+        a.place_order(market("BTC-USD", Side::Sell, 0.01), btc, now()).unwrap();
+        assert!(!a.positions.contains_key("BTC-USD"));
+
+        let err = a.place_order(market("NOVA", Side::Buy, 1.5), px(10.0), now()).unwrap_err();
+        assert_eq!(err, EngineError::QtyIncrement(1.0));
+        let err = a.place_order(market("NOVA", Side::Buy, f64::NAN), px(10.0), now()).unwrap_err();
+        assert_eq!(err, EngineError::InvalidQuantity);
+    }
+
+    #[test]
     fn summary_reports_equity_and_pnl() {
         let mut a = acct(10_000.0);
-        a.place_order(market("NOVA", Side::Buy, 10), Some(100.0), now()).unwrap();
-        a.place_order(market("QBIT", Side::Buy, 20), Some(50.0), now()).unwrap();
+        a.place_order(market("NOVA", Side::Buy, 10), px(100.0), now()).unwrap();
+        a.place_order(market("QBIT", Side::Buy, 20), px(50.0), now()).unwrap();
         let s = a.summary(&prices(&[("NOVA", 110.0), ("QBIT", 45.0)]));
         assert_eq!(s.cash, 8_000.0);
         assert_eq!(s.positions_value, 1_100.0 + 900.0);
@@ -650,11 +688,11 @@ mod tests {
     #[test]
     fn account_round_trips_through_json() {
         let mut a = acct(1_000.0);
-        a.place_order(market("NOVA", Side::Buy, 2), Some(100.0), now()).unwrap();
+        a.place_order(market("NOVA", Side::Buy, 2), px(100.0), now()).unwrap();
         let json = serde_json::to_string(&a).unwrap();
         let b: Account = serde_json::from_str(&json).unwrap();
         assert_eq!(b.cash, a.cash);
-        assert_eq!(b.positions["NOVA"].qty, 2);
+        assert_eq!(b.positions["NOVA"].qty, 2.0);
         assert_eq!(b.trades.len(), 1);
     }
 }

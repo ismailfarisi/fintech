@@ -1,4 +1,4 @@
-//! Shared application state, persistence and the background market loop.
+//! Shared application state, persistence and the order-matching loop.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -10,14 +10,18 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::engine::{Account, PortfolioSummary, Trade};
-use crate::market::{Market, Quote};
+use crate::market::hub::StatusMap;
+use crate::market::{MarketStore, Quote};
 
 pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
-    pub market: RwLock<Market>,
+    pub market: Arc<RwLock<MarketStore>>,
+    pub providers: StatusMap,
     pub account: Mutex<Account>,
     pub events: broadcast::Sender<Event>,
+    /// Prices loaded from the data file (lets the simulator resume).
+    pub saved_prices: BTreeMap<String, f64>,
     data_path: Option<PathBuf>,
 }
 
@@ -25,7 +29,6 @@ pub struct AppState {
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
     account: Account,
-    /// Last market prices, so the simulation resumes where it left off.
     #[serde(default)]
     prices: BTreeMap<String, f64>,
 }
@@ -52,15 +55,17 @@ impl AppState {
                     None
                 }
             });
-        let (account, prices) = match snapshot {
+        let (account, saved_prices) = match snapshot {
             Some(s) => (s.account, s.prices),
             None => (Account::default(), BTreeMap::new()),
         };
         let (events, _) = broadcast::channel(256);
         Arc::new(AppState {
-            market: RwLock::new(Market::simulated(&prices)),
+            market: Arc::new(RwLock::new(MarketStore::new())),
+            providers: StatusMap::default(),
             account: Mutex::new(account),
             events,
+            saved_prices,
             data_path,
         })
     }
@@ -68,7 +73,7 @@ impl AppState {
     /// Persist the account atomically (write temp file, then rename).
     pub fn save(&self) {
         let Some(path) = &self.data_path else { return };
-        let prices = self.market.read().unwrap().prices();
+        let prices = self.valuation_prices();
         let json = {
             let account = self.account.lock().unwrap().clone();
             serde_json::to_vec_pretty(&Snapshot { account, prices })
@@ -92,25 +97,31 @@ impl AppState {
         let _ = self.events.send(event);
     }
 
-    /// One market tick: move prices, match limit orders, broadcast.
+    /// Prices for valuing positions: live where available, else last saved.
+    /// (Order matching uses live prices only.)
+    pub fn valuation_prices(&self) -> BTreeMap<String, f64> {
+        let mut prices = self.saved_prices.clone();
+        prices.extend(self.market.read().unwrap().prices());
+        prices
+    }
+
+    /// One engine tick: match limit orders against live prices, broadcast.
     pub fn tick(&self) -> Vec<Trade> {
-        let (prices, quotes) = {
-            let mut market = self.market.write().unwrap();
-            market.step(1.0);
+        let (live, quotes) = {
+            let market = self.market.read().unwrap();
             (market.prices(), market.quotes())
         };
+        let mut valuation = self.saved_prices.clone();
+        valuation.extend(live.iter().map(|(k, v)| (k.clone(), *v)));
         let now = Utc::now();
         let (trades, portfolio) = {
             let mut account = self.account.lock().unwrap();
-            let trades = account.on_prices(&prices, now);
-            account.record_equity(&prices, now);
-            (trades, account.summary(&prices))
+            let trades = account.on_prices(&live, now);
+            account.record_equity(&valuation, now);
+            (trades, account.summary(&valuation))
         };
         for trade in &trades {
-            tracing::info!(
-                "limit fill: {:?} {} {} @ {:.2}",
-                trade.side, trade.qty, trade.symbol, trade.price
-            );
+            tracing::info!("limit fill: {:?} {} {} @ {}", trade.side, trade.qty, trade.symbol, trade.price);
             self.notify(Event::Fill { trade: trade.clone() });
         }
         self.notify(Event::Tick { quotes, portfolio });
@@ -118,8 +129,8 @@ impl AppState {
     }
 }
 
-/// Run the market forever, ticking every `interval`.
-pub async fn run_market(state: SharedState, interval: Duration) {
+/// Run the engine forever, ticking every `interval`.
+pub async fn run_engine(state: SharedState, interval: Duration) {
     let mut ticker = tokio::time::interval(interval);
     let mut n: u64 = 0;
     loop {

@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError, type CashFlow, type Order, type Trade } from '../api'
-import { dateTime, money, signedMoney, tone } from '../format'
+import { ago, dateTime, money, price, qty, signedMoney, sourceLabel, tone } from '../format'
 import { useLive } from '../live'
 
 export function Activity() {
-  const { revision, refresh, portfolio } = useLive()
+  const { revision, refresh, portfolio, providers } = useLive()
   const [trades, setTrades] = useState<Trade[]>([])
   const [orders, setOrders] = useState<Order[]>([])
   const [flows, setFlows] = useState<CashFlow[]>([])
@@ -44,10 +44,27 @@ export function Activity() {
         </section>
         <section className="card">
           <h2>Account</h2>
-          <p className="muted">Paper trading on a simulated market. Start over with $100,000.</p>
+          <p className="muted">Paper trading: orders fill against live market prices, but no real money moves. Start over with $100,000.</p>
           <button className="danger" onClick={reset}>Reset account</button>
         </section>
       </div>
+
+      <section className="card">
+        <h2>Data sources</h2>
+        {providers.length === 0 ? <div className="empty">No providers reported.</div> : (
+          <ul className="sources">
+            {providers.map((p) => (
+              <li key={p.id}>
+                <span className={`source-state ${p.state}`}>{p.state === 'live' ? '●' : '○'} {p.state}</span>
+                <strong>{sourceLabel(p.id)}</strong>
+                <small>{p.symbols.length} symbols{p.last_event_at ? ` · last update ${ago(p.last_event_at)}` : ''}{p.reconnects ? ` · ${p.reconnects} reconnects` : ''}</small>
+                {p.last_error && p.state !== 'live' && <span className="source-error">{p.last_error}</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="muted small-print">Configure providers in <code>backend/markets.toml</code>. Alpaca needs <code>ALPACA_API_KEY_ID</code> and <code>ALPACA_API_SECRET_KEY</code>.</p>
+      </section>
 
       <section className="card">
         <div className="tabs">
@@ -65,8 +82,8 @@ export function Activity() {
                   <td>{dateTime(t.at)}</td>
                   <td><span className={`pill ${t.side}`}>{t.side}</span></td>
                   <td><strong>{t.symbol}</strong></td>
-                  <td className="num">{t.qty}</td>
-                  <td className="num">{money(t.price)}</td>
+                  <td className="num">{qty(t.qty)}</td>
+                  <td className="num">{price(t.price)}</td>
                   <td className="num">{money(t.total)}</td>
                   <td className={`num ${t.realized_pnl === null ? '' : tone(t.realized_pnl)}`}>{t.realized_pnl === null ? '—' : signedMoney(t.realized_pnl)}</td>
                 </tr>
@@ -85,9 +102,9 @@ export function Activity() {
                   <td><span className={`pill ${o.side}`}>{o.side}</span></td>
                   <td><strong>{o.symbol}</strong></td>
                   <td>{o.kind}</td>
-                  <td className="num">{o.qty}</td>
-                  <td className="num">{o.limit_price === null ? '—' : money(o.limit_price)}</td>
-                  <td className="num">{o.fill_price === null ? '—' : money(o.fill_price)}</td>
+                  <td className="num">{qty(o.qty)}</td>
+                  <td className="num">{o.limit_price === null ? '—' : price(o.limit_price)}</td>
+                  <td className="num">{o.fill_price === null ? '—' : price(o.fill_price)}</td>
                   <td><span className={`status ${o.status}`}>{o.status}</span></td>
                 </tr>
               ))}

@@ -7,14 +7,29 @@ export type OrderStatus = 'open' | 'filled' | 'cancelled'
 export interface Quote {
   symbol: string
   name: string
-  sector: string
+  asset_class: 'equity' | 'crypto'
+  /** Provider id, e.g. "coinbase", "alpaca", "simulated". */
+  source: string
+  /** What `reference` means: "Prev close", "24h open", ... */
+  reference_label: string
+  /** Smallest tradable quantity. */
+  qty_step: number
   price: number
-  open: number
+  reference: number
   high: number
   low: number
   change: number
   change_pct: number
   updated_at: string
+}
+
+export interface ProviderStatus {
+  id: string
+  state: 'connecting' | 'live' | 'reconnecting'
+  symbols: string[]
+  last_event_at: string | null
+  last_error: string | null
+  reconnects: number
 }
 
 export interface PricePoint { t: string; price: number }
@@ -104,6 +119,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 }
 
 export const api = {
+  providers: () => req<ProviderStatus[]>('GET', '/api/providers'),
   quotes: () => req<Quote[]>('GET', '/api/quotes'),
   quote: (symbol: string) => req<{ quote: Quote; history: PricePoint[] }>('GET', `/api/quotes/${symbol}`),
   portfolio: () => req<Portfolio>('GET', '/api/portfolio'),

@@ -1,0 +1,22 @@
+# Market data providers. Each [[provider]] block is one adapter (see src/market/).
+# Symbols must be unique across providers; the first provider to claim one wins.
+# Restart the server after editing.
+
+# Crypto from Coinbase: public data, no account or API key needed.
+[[provider]]
+kind = "coinbase"
+products = ["BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD"]
+
+# US stocks from Alpaca. Needs a free account at https://alpaca.markets and two env vars:
+#   ALPACA_API_KEY_ID=...  ALPACA_API_SECRET_KEY=...
+# Without them this provider is skipped with a warning.
+[[provider]]
+kind = "alpaca"
+symbols = ["AAPL", "MSFT", "NVDA", "AMZN", "TSLA", "SPY"]
+feed = "iex"        # iex (free, real-time, IEX volume only) | sip (paid) | delayed_sip | test
+# qty_step = 1      # smallest tradable quantity; e.g. 0.001 for fractional shares
+
+# Offline fictional market. Uncomment for demos without network access.
+# [[provider]]
+# kind = "simulated"
+# tick_ms = 1000

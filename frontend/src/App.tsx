@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { money } from './format'
+import { money, price, qty } from './format'
 import { LiveProvider, useLive } from './live'
 import { Activity } from './pages/Activity'
 import { Dashboard } from './pages/Dashboard'
@@ -23,14 +23,15 @@ function Toast() {
   // Keyed by trade id so each fill restarts the CSS fade-out animation.
   return (
     <div key={lastFill.id} className="toast" role="status">
-      ✓ {lastFill.side === 'buy' ? 'Bought' : 'Sold'} {lastFill.qty} {lastFill.symbol} @ {money(lastFill.price)}
+      ✓ {lastFill.side === 'buy' ? 'Bought' : 'Sold'} {qty(lastFill.qty)} {lastFill.symbol} @ {price(lastFill.price)}
     </div>
   )
 }
 
 function Shell() {
   const [path, go] = useRoute()
-  const { connected, portfolio } = useLive()
+  const { connected, portfolio, providers } = useLive()
+  const down = providers.filter((p) => p.state !== 'live')
   const [, section, arg] = path.split('/')
 
   return (
@@ -44,7 +45,13 @@ function Shell() {
         </nav>
         <div className="topbar-right">
           {portfolio && <span className="muted">{money(portfolio.equity)}</span>}
-          <span className={`conn ${connected ? 'on' : 'off'}`}>{connected ? '● Live' : '○ Reconnecting'}</span>
+          <a
+            href="#/activity"
+            className={`conn ${!connected ? 'off' : down.length ? 'warn' : 'on'}`}
+            title={providers.map((p) => `${p.id}: ${p.state}${p.last_error ? ` (${p.last_error})` : ''}`).join('\n')}
+          >
+            {!connected ? '○ Reconnecting' : down.length ? `◐ ${down.length} feed${down.length > 1 ? 's' : ''} down` : '● Live'}
+          </a>
         </div>
       </header>
       <main>

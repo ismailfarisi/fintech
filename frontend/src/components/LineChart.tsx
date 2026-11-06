@@ -56,6 +56,13 @@ export function LineChart({ points, height = 260, format, reference, ariaLabel }
     setHover(Math.round(Math.min(1, Math.max(0, frac)) * (points.length - 1)))
   }
 
+  // Show dates on the axis when the series spans more than ~a day.
+  const spanMs = new Date(points[points.length - 1].t).getTime() - new Date(points[0].t).getTime()
+  const axisLabel = (iso: string) =>
+    spanMs > 20 * 3600_000
+      ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
   const h = hover !== null ? points[hover] : null
   const hx = hover !== null ? geo.x(hover) : 0
   const first = points[0]
@@ -70,8 +77,8 @@ export function LineChart({ points, height = 260, format, reference, ariaLabel }
             <text className="tick" x={PAD.left - 8} y={geo.y(t)} dy="0.32em" textAnchor="end">{format(t)}</text>
           </g>
         ))}
-        <text className="tick" x={PAD.left} y={height - 6}>{new Date(first.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</text>
-        <text className="tick" x={width - PAD.right} y={height - 6} textAnchor="end">{new Date(last.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</text>
+        <text className="tick" x={PAD.left} y={height - 6}>{axisLabel(first.t)}</text>
+        <text className="tick" x={width - PAD.right} y={height - 6} textAnchor="end">{axisLabel(last.t)}</text>
         {reference && (
           <g>
             <line className="ref" x1={PAD.left} x2={width - PAD.right} y1={geo.y(reference.value)} y2={geo.y(reference.value)} />
@@ -93,7 +100,7 @@ export function LineChart({ points, height = 260, format, reference, ariaLabel }
       {h && (
         <div className="tooltip" style={{ left: Math.min(hx + 12, width - 150), top: PAD.top }}>
           <div className="tooltip-value">{format(h.v)}</div>
-          <div className="tooltip-label">{new Date(h.t).toLocaleTimeString()}</div>
+          <div className="tooltip-label">{new Date(h.t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
         </div>
       )}
     </div>

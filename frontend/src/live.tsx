@@ -1,10 +1,12 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { api, type LiveEvent, type Portfolio, type Quote, type Trade } from './api'
+import { api, type LiveEvent, type Portfolio, type ProviderStatus, type Quote, type Trade } from './api'
 
 interface LiveState {
   quotes: Quote[]
   portfolio: Portfolio | null
   connected: boolean
+  /** Market-data provider health, polled from the backend. */
+  providers: ProviderStatus[]
   /** Bumps whenever orders/trades/cash change, so views can refetch. */
   revision: number
   lastFill: Trade | null
@@ -17,6 +19,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const [quotes, setQuotes] = useState<Quote[]>([])
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
   const [connected, setConnected] = useState(false)
+  const [providers, setProviders] = useState<ProviderStatus[]>([])
   const [revision, setRevision] = useState(0)
   const [lastFill, setLastFill] = useState<Trade | null>(null)
   const retry = useRef(0)
@@ -29,6 +32,9 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     api.quotes().then(setQuotes).catch(() => {})
     api.portfolio().then(setPortfolio).catch(() => {})
+    const loadProviders = () => api.providers().then(setProviders).catch(() => {})
+    loadProviders()
+    const providerTimer = setInterval(loadProviders, 10_000)
 
     let ws: WebSocket | null = null
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -59,11 +65,11 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       }
     }
     connect()
-    return () => { closed = true; clearTimeout(timer); ws?.close() }
+    return () => { closed = true; clearTimeout(timer); clearInterval(providerTimer); ws?.close() }
   }, [])
 
   return (
-    <LiveContext.Provider value={{ quotes, portfolio, connected, revision, lastFill, refresh }}>
+    <LiveContext.Provider value={{ quotes, portfolio, connected, providers, revision, lastFill, refresh }}>
       {children}
     </LiveContext.Provider>
   )
